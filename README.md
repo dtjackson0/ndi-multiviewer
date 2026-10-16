@@ -1,4 +1,3 @@
-cat << 'EOF' > README.md
 # NDI Multiviewer & ISO Recorder
 
 A high-performance, cross-platform Python desktop application for real-time NDI (Network Device Interface) video grid monitoring, audio metering, and synchronized multi-camera ISO recording to disk.
