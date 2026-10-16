@@ -1,0 +1,24 @@
+# Python cache & build files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# Recorded video/audio output
+captures/
+*.mp4
+*.mov
+*.wav
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
