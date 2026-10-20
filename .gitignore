@@ -1,6 +1,27 @@
+# Virtual Environment
 venv/
+.venv/
+ENV/
+
+# Python Bytecode & Cache
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Recorded Video Captures
 captures/
 *.mp4
 *.mov
+*.mkv
+
+# PyInstaller Build Outputs
+build/
+dist/
+*.spec
+
+# OS & Editor Files
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+EOF
