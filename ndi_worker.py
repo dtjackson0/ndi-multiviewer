@@ -1,4 +1,3 @@
-import sys
 import time
 import socket
 import platform
@@ -8,6 +7,18 @@ import numpy as np
 import NDIlib as ndi
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
+
+
+def get_ndi_name(source_obj) -> str:
+    """Compatible with both ndi-python v5 (p_ndi_name) and v6 (ndi_name)."""
+    return getattr(source_obj, "ndi_name", getattr(source_obj, "p_ndi_name", ""))
+
+
+def set_ndi_name(source_obj, name: str):
+    if hasattr(source_obj, "ndi_name"):
+        source_obj.ndi_name = name
+    else:
+        source_obj.p_ndi_name = name
 
 
 def detect_best_h264_encoder() -> str:
@@ -54,7 +65,8 @@ def detect_best_h264_encoder() -> str:
 class NDIStreamWorker(QThread):
     frame_ready = Signal(QImage)
     audio_levels = Signal(float, float)
-    stream_specs = Signal(int, int, float)  # (width, height, fps)
+    stream_specs = Signal(int, int, float)        # (width, height, fps)
+    audio_pcm_ready = Signal(bytes, int, int)     # (interleaved_f32_bytes, sample_rate, channels)
 
     def __init__(self, source_name: str, selected_encoder: str = "libx264"):
         super().__init__()
@@ -62,9 +74,10 @@ class NDIStreamWorker(QThread):
         self.encoder = selected_encoder
         self.running = True
         self.recording = False
+        self.paused = False
+        self.play_host_audio = False
         self.record_process = None
 
-        # Detected stream properties
         self.stream_width = 1920
         self.stream_height = 1080
         self.current_fps = 30.0
@@ -72,12 +85,10 @@ class NDIStreamWorker(QThread):
         self.sample_rate = 48000
         self.audio_channels = 2
 
-        # Benchmarks & throttling
         self.frame_count = 0
         self.last_fps_calc = time.time()
         self.last_audio_emit = 0.0
 
-        # Localhost sockets for FFmpeg A/V pipeline
         self.v_server = None
         self.a_server = None
         self.v_conn = None
@@ -91,10 +102,17 @@ class NDIStreamWorker(QThread):
         s.settimeout(5.0)
         return s, s.getsockname()[1]
 
+    def set_paused(self, paused: bool):
+        self.paused = paused
+
+    def set_host_audio_enabled(self, enabled: bool):
+        self.play_host_audio = enabled
+
     def start_recording(self, output_filename: str):
         if self.recording:
             return
 
+        self.paused = False
         self.v_server, v_port = self._create_server_socket()
         use_audio = self.has_audio
         if use_audio:
@@ -148,7 +166,6 @@ class NDIStreamWorker(QThread):
             creationflags=creation_flags
         )
 
-        # Accept socket connections asynchronously so video polling never blocks
         def _accept_pipes():
             try:
                 self.v_conn, _ = self.v_server.accept()
@@ -162,6 +179,7 @@ class NDIStreamWorker(QThread):
 
     def stop_recording(self):
         self.recording = False
+        self.paused = False
         for sock in [self.v_conn, self.a_conn, self.v_server, self.a_server]:
             if sock:
                 try:
@@ -195,7 +213,7 @@ class NDIStreamWorker(QThread):
         recv = ndi.recv_create_v3(recv_create)
 
         source = ndi.Source()
-        source.p_ndi_name = self.source_name
+        set_ndi_name(source, self.source_name)
         ndi.recv_connect(recv, source)
 
         while self.running:
@@ -207,10 +225,8 @@ class NDIStreamWorker(QThread):
                 self.stream_width = w
                 self.stream_height = h
 
-                # Copy contiguous frame buffer
                 data = np.ascontiguousarray(video_frame.data)
 
-                # Calculate live framerate
                 self.frame_count += 1
                 now = time.time()
                 elapsed = now - self.last_fps_calc
@@ -220,7 +236,8 @@ class NDIStreamWorker(QThread):
                     self.last_fps_calc = now
                     self.stream_specs.emit(w, h, self.current_fps)
 
-                if self.recording and self.v_conn:
+                # Write video frame only if recording AND not paused
+                if self.recording and not self.paused and self.v_conn:
                     try:
                         self.v_conn.sendall(data.tobytes())
                     except (BrokenPipeError, ConnectionResetError, OSError):
@@ -236,12 +253,20 @@ class NDIStreamWorker(QThread):
                 self.audio_channels = audio_frame.no_channels
                 audio_data = np.copy(audio_frame.data)
 
-                if self.recording and self.a_conn:
-                    interleaved = audio_data.T.astype(np.float32).tobytes()
+                interleaved_bytes = None
+                if (self.recording and not self.paused and self.a_conn) or self.play_host_audio:
+                    interleaved_bytes = audio_data.T.astype(np.float32).tobytes()
+
+                # Write audio samples to FFmpeg if recording and not paused
+                if self.recording and not self.paused and self.a_conn and interleaved_bytes:
                     try:
-                        self.a_conn.sendall(interleaved)
+                        self.a_conn.sendall(interleaved_bytes)
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         self.stop_recording()
+
+                # Send audio samples to host computer output if enabled
+                if self.play_host_audio and interleaved_bytes:
+                    self.audio_pcm_ready.emit(interleaved_bytes, self.sample_rate, self.audio_channels)
 
                 now = time.time()
                 if now - self.last_audio_emit > 0.033:
